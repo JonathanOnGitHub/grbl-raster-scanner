@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GRBL Raster Scanner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #f5f6f8;
+  --surface:   #ffffff;
+  --surface-2: #fafbfc;
+  --border:    #e1e5ea;
+  --border-2:  #cdd3da;
+  --text:      #1a1f29;
+  --text-2:    #4a5462;
+  --text-3:    #6b7686;
+  --accent:    #2563eb;
+  --accent-h:  #1d4ed8;
+  --accent-bg: #eef4ff;
+  --green:     #16a34a;
+  --green-bg:  #ecfdf5;
+  --yellow:    #ca8a04;
+  --yellow-bg: #fef9c3;
+  --red:       #dc2626;
+  --red-bg:    #fef2f2;
+  --orange:    #ea580c;
+  --shadow:    0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06);
+  --shadow-lg: 0 4px 6px -1px rgba(15,23,42,.08), 0 2px 4px -2px rgba(15,23,42,.06);
+  --radius:    8px;
+  --radius-sm: 6px;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Focus ring (a11y) ── */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ── HEADER ── */
+header {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 14px;
+  padding: 9px 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  z-index: 10;
+}
+.brand {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.brand .accent { color: var(--accent); }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+.pill::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-3);
+}
+.pill.on   { color: var(--green);  background: var(--green-bg);  border-color: #bbf7d0; }
+.pill.on::before   { background: var(--green);  box-shadow: 0 0 0 3px rgba(22,163,74,.15); }
+.pill.run  { color: var(--yellow); background: var(--yellow-bg); border-color: #fde68a; }
+.pill.run::before  { background: var(--yellow); animation: pulse 1.2s ease-in-out infinite; }
+.pill.pause{ color: var(--orange); background: #fff7ed; border-color: #fed7aa; }
+.pill.pause::before{ background: var(--orange); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+#hdr-pos {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+#hdr-pos .lbl { color: var(--text-3); margin-right: 2px; }
+#hdr-pos .val { color: var(--text); font-weight: 500; }
+#hdr-pos span + span { margin-left: 14px; }
+
+/* ── BODY ── */
+.body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
+  gap: 14px;
+  padding: 14px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Tabs ── */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px;
+  box-shadow: var(--shadow);
+}
+.tab {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background .12s, color .12s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.tab:hover { background: var(--surface-2); color: var(--text); }
+.tab.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: #bfdbfe;
+}
+.tab .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--border-2);
+}
+.tab.active .dot { background: var(--accent); }
+.tab-panel { display: none; flex-direction: column; gap: 10px; min-height: 0; }
+.tab-panel.active { display: flex; }
+
+.left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  min-width: 0;
+}
+.left::-webkit-scrollbar { width: 8px; }
+.left::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+.left::-webkit-scrollbar-thumb:hover { background: #a8b1bd; }
+
+.right {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── CARDS ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.card-hdr {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.card-hdr h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+.card-hdr .tag {
+  font-size: 11px; font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.card-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── FORMS ── */
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 0;
+}
+label .hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+  margin-left: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  width: 100%;
+  min-width: 0;
+  transition: border-color .12s, box-shadow .12s;
+}
+input:hover, select:hover, textarea:hover { border-color: #9aa3b1; }
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37,99,235,.15);
+}
+textarea {
+  font-family: var(--mono);
+  font-size: 13px;
+  resize: vertical;
+  min-height: 72px;
+  line-height: 1.5;
+}
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%236b7686'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z' clip-rule='evenodd'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 18px;
+  padding-right: 36px;
+}
+
+.g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.g4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+
+/* ── BUTTONS ── */
+button {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, box-shadow .12s, transform .04s;
+  border: 1px solid transparent;
+  background: var(--surface);
+  color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px;
+}
+button:hover:not(:disabled)  { transform: translateY(-1px); }
+button:active:not(:disabled) { transform: translateY(0); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent-h); border-color: var(--accent-h); }
+
+.btn-secondary {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-2);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--surface-2); border-color: #9aa3b1; }
+
+.btn-warn {
+  background: #fff;
+  color: var(--yellow);
+  border-color: #fde68a;
+}
+.btn-warn:hover:not(:disabled) { background: var(--yellow-bg); }
+
+.btn-danger {
+  background: #fff;
+  color: var(--red);
+  border-color: #fecaca;
+}
+.btn-danger:hover:not(:disabled) { background: var(--red-bg); }
+
+.btn-success {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+}
+.btn-success:hover:not(:disabled) { background: #15803d; border-color: #15803d; }
+
+.btn-sm { padding: 6px 10px; font-size: 13px; }
+.btn-icon {
+  width: 36px; height: 36px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.row-tight { display: flex; gap: 6px; }
+.row > * { flex: 0 0 auto; }
+.row.fill > button { flex: 1; }
+.spacer { flex: 1; }
+
+/* ── Jog pad ── */
+.jog-pad {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.jog-block { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.jog-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-align: center;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.jog-xy {
+  display: grid;
+  grid-template-columns: repeat(3, 40px);
+  grid-template-rows: repeat(3, 40px);
+  gap: 3px;
+}
+.jog-z {
+  display: grid;
+  grid-template-columns: 40px;
+  grid-template-rows: repeat(2, 40px);
+  gap: 3px;
+}
+.jog-btn {
+  width: 40px; height: 40px;
+  font-size: 16px;
+  padding: 0;
+  border: 1px solid var(--border-2);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.jog-btn:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.jog-btn.home {
+  background: var(--accent-bg);
+  border-color: #bfdbfe;
+  color: var(--accent);
+  font-size: 16px;
+}
+.jog-btn.home:hover:not(:disabled) { background: #dbeafe; }
+
+.jog-config {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+/* ── Checkbox ── */
+.checkbox {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox input[type=checkbox] {
+  width: 18px; height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.checkbox:hover { color: var(--accent); }
+
+/* ── Canvas area ── */
+.canvas-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  min-height: 0;
+}
+.canvas-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.canvas-hdr h2 { font-size: 14px; font-weight: 600; }
+.canvas-info {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.canvas-wrap {
+  position: relative;
+  flex: 1;
+  background: #fafbfc;
+  min-height: 0;
+}
+#grid-canvas { width: 100%; height: 100%; display: block; }
+
+.progress-overlay {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.prog-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 13px;
+}
+.prog-label { color: var(--text-2); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.prog-pct {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.prog-track {
+  height: 8px;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.prog-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), #60a5fa);
+  border-radius: 999px;
+  transition: width .3s ease;
+}
+
+/* ── Log ── */
+.log-card {
+  flex: 0 0 auto;
+  height: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-hdr {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.log-hdr .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(22,163,74,.18);
+}
+#log {
+  flex: 1; overflow-y: auto;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+#log::-webkit-scrollbar { width: 8px; }
+#log::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+.ll { padding: 2px 0; }
+.ll .ts { color: var(--text-3); margin-right: 6px; }
+.ll-info  { color: var(--text-2); }
+.ll-warn  { color: var(--yellow); }
+.ll-error { color: var(--red); font-weight: 500; }
+.ll-grbl  { color: var(--text-3); }
+.ll-cmd   { color: var(--accent); }
+.ll-serial{ color: var(--green); }
+
+/* ── Responsive ── */
+@media (max-width: 1280px) {
+  .body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    overflow-y: auto;
+  }
+  .left { overflow-y: visible; max-height: none; }
+  .right { min-height: 60vh; }
+  .canvas-card { min-height: 400px; }
+}
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+  header { padding: 10px 14px; }
+  .body { padding: 10px; gap: 10px; }
+  .card-body { padding: 12px; }
+  .g3, .g4 { grid-template-columns: 1fr 1fr; }
+  .jog-xy { grid-template-columns: repeat(3, 44px); }
+  .jog-z { grid-template-columns: 44px; }
+  .jog-btn { width: 44px; height: 44px; }
+  #hdr-pos .x-only, #hdr-pos span:not(.x-only) { display: inline; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">GRBL <span class="accent">Raster Scanner</span></div>
+  <span class="pill" id="pill-conn">Disconnected</span>
+  <span class="pill" id="pill-job" style="display:none">Idle</span>
+  <div id="hdr-pos">
+    <span class="x-only"><span class="lbl">X</span><span class="val" id="hdr-x">—</span></span>
+    <span class="x-only"><span class="lbl">Y</span><span class="val" id="hdr-y">—</span></span>
+    <span class="x-only"><span class="lbl">Z</span><span class="val" id="hdr-z">—</span></span>
+  </div>
+</header>
+
+<div class="body">
+
+  <!-- ═══ LEFT: all controls ═══ -->
+  <div class="left">
+
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="connect"   role="tab"><span class="dot"></span>Connect</button>
+      <button class="tab"        data-tab="jog"       role="tab"><span class="dot"></span>Jog</button>
+      <button class="tab"        data-tab="grid"      role="tab"><span class="dot"></span>Grid</button>
+      <button class="tab"        data-tab="program"   role="tab"><span class="dot"></span>Program</button>
+      <button class="tab"        data-tab="job"       role="tab"><span class="dot"></span>Job</button>
+    </div>
+
+    <!-- Tab: Connection -->
+    <div class="tab-panel active" data-panel="connect">
+      <div class="card">
+        <div class="card-hdr"><h2>Connection</h2></div>
+        <div class="card-body">
+          <div class="g2">
+            <label>Serial port
+              <div class="row-tight">
+                <select id="port-select" style="flex:1"></select>
+                <button class="btn-secondary btn-sm" onclick="refreshPorts()" title="Refresh ports">↻</button>
+              </div>
+            </label>
+            <label>Baud rate
+              <select id="baud-select">
+                <option value="115200" selected>115200</option>
+                <option value="9600">9600</option>
+                <option value="38400">38400</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <button class="btn-primary"   id="btn-connect"    onclick="connect()">Connect</button>
+            <button class="btn-secondary" id="btn-disconnect" onclick="disconnect()" disabled>Disconnect</button>
+            <span class="spacer"></span>
+            <button class="btn-warn btn-sm" onclick="apiPost('/api/unlock')">Unlock ($X)</button>
+            <button class="btn-warn btn-sm" onclick="apiPost('/api/home')">Home ($H)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Jog -->
+    <div class="tab-panel" data-panel="jog">
+      <div class="card">
+        <div class="card-hdr"><h2>Manual Jog</h2></div>
+        <div class="card-body">
+          <div class="jog-pad">
+            <div class="jog-block">
+              <div class="jog-label">XY</div>
+              <div class="jog-xy">
+                <div></div>
+                <button class="jog-btn" onclick="jog('Y+')" aria-label="Y plus">▲</button>
+                <div></div>
+                <button class="jog-btn" onclick="jog('X-')" aria-label="X minus">◄</button>
+                <button class="jog-btn home" onclick="jog('zero')" aria-label="Go to origin" title="Go to 0,0,0">⌂</button>
+                <button class="jog-btn" onclick="jog('X+')" aria-label="X plus">►</button>
+                <div></div>
+                <button class="jog-btn" onclick="jog('Y-')" aria-label="Y minus">▼</button>
+                <div></div>
+              </div>
+            </div>
+            <div class="jog-block">
+              <div class="jog-label">Z</div>
+              <div class="jog-z">
+                <button class="jog-btn" onclick="jog('Z+')" aria-label="Z up">▲</button>
+                <button class="jog-btn" onclick="jog('Z-')" aria-label="Z down">▼</button>
+              </div>
+            </div>
+            <div class="jog-config">
+              <label>Step size <span class="hint">(mm)</span>
+                <input type="number" id="jog-step" value="1" step="0.1" min="0.01">
+              </label>
+              <label>Feed <span class="hint">(mm/min)</span>
+                <input type="number" id="jog-feed" value="500" min="1">
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Grid -->
+    <div class="tab-panel" data-panel="grid">
+      <div class="card">
+        <div class="card-hdr">
+          <h2>Scan Grid</h2>
+          <span class="spacer"></span>
+          <button class="btn-secondary btn-sm" id="btn-set-a1"  onclick="setOriginA1()"  title="Move to A1 corner and zero work origin">📍 Set origin at A1</button>
+        </div>
+        <div class="card-body">
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-3);align-self:center;margin-right:4px">Preset:</span>
+            <button class="btn-secondary btn-sm" onclick="applyPlatePreset()">96-well plate <span class="hint" style="margin-left:4px">(8×12, 9mm)</span></button>
+            <button class="btn-secondary btn-sm" onclick="apply24Preset()">24-well plate <span class="hint" style="margin-left:4px">(4×6, 19.3mm)</span></button>
+            <button class="btn-secondary btn-sm" onclick="applyGrid10()">10mm grid</button>
+            <button class="btn-secondary btn-sm" onclick="applyGrid5()">5mm grid</button>
+          </div>
+          <div class="g3">
+            <label>X start <span class="hint">(mm)</span>
+              <input type="number" id="x_start" value="0">
+            </label>
+            <label>X end <span class="hint">(mm)</span>
+              <input type="number" id="x_end"   value="50">
+            </label>
+            <label>X step <span class="hint">(mm)</span>
+              <input type="number" id="x_step"  value="10" min="0.01">
+            </label>
+          </div>
+          <div class="g3">
+            <label>Y start <span class="hint">(mm)</span>
+              <input type="number" id="y_start" value="0">
+            </label>
+            <label>Y end <span class="hint">(mm)</span>
+              <input type="number" id="y_end"   value="50">
+            </label>
+            <label>Y step <span class="hint">(mm)</span>
+              <input type="number" id="y_step"  value="10" min="0.01">
+            </label>
+          </div>
+          <div class="g4">
+            <label>Z travel <span class="hint">(mm)</span>
+              <input type="number" id="z_travel" value="5"  step="0.5">
+            </label>
+            <label>Z work <span class="hint">(mm)</span>
+              <input type="number" id="z_work"   value="-2" step="0.5">
+            </label>
+            <label>XY feed <span class="hint">(mm/min)</span>
+              <input type="number" id="feed_xy" value="1000" min="1">
+            </label>
+            <label>Z feed <span class="hint">(mm/min)</span>
+              <input type="number" id="feed_z"  value="300" min="1">
+            </label>
+          </div>
+          <div class="row" style="gap:18px">
+            <label class="checkbox">
+              <input type="checkbox" id="serpentine" checked>
+              Serpentine path
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="relative_origin">
+              Start from current position
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Program -->
+    <div class="tab-panel" data-panel="program">
+      <div class="card">
+        <div class="card-hdr">
+          <h2>User Program</h2>
+          <span class="tag">SCAN_X</span>
+          <span class="tag">SCAN_Y</span>
+          <span class="tag">SCAN_Z_WORK</span>
+        </div>
+        <div class="card-body">
+          <label>Shell command
+            <textarea id="user_cmd" placeholder="e.g.  bash /home/pi/measure.sh"></textarea>
+          </label>
+          <div class="g3">
+            <label>Finish mode
+              <select id="finish_mode" onchange="updateFinishUI()">
+                <option value="serial">Serial pattern</option>
+                <option value="manual">Manual button</option>
+                <option value="http">Trust exit code</option>
+              </select>
+            </label>
+            <label id="lbl-pattern">Pattern <span class="hint">(regex)</span>
+              <input type="text" id="finish_pattern" value="SCAN_DONE">
+            </label>
+            <label>Timeout <span class="hint">(sec)</span>
+              <input type="number" id="cmd_timeout" value="120" min="1">
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Job -->
+    <div class="tab-panel" data-panel="job">
+      <div class="card">
+        <div class="card-hdr"><h2>Job Control</h2></div>
+        <div class="card-body">
+          <label class="checkbox">
+            <input type="checkbox" id="run_program" checked>
+            Run user program at each point
+            <span class="hint" style="margin-left:auto">Uncheck for dry-run (move only)</span>
+          </label>
+          <div class="row fill">
+            <button class="btn-success" id="btn-start" onclick="startJob()" disabled>▶ Start scan</button>
+            <button class="btn-warn"    id="btn-pause" onclick="pauseJob()" disabled>⏸ Pause</button>
+            <button class="btn-danger"  id="btn-stop"  onclick="stopJob()"  disabled>■ Stop</button>
+            <button class="btn-success" id="btn-done"  onclick="manualFinish()" style="display:none">✓ Done</button>
+          </div>
+          <p style="font-size:12px;color:var(--text-3);line-height:1.5">
+            Configure the scan grid and user program on their tabs, then start a job here.
+            The scan preview on the right shows the path taken.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end .left -->
+
+  <!-- ═══ RIGHT: canvas + log ═══ -->
+  <div class="right">
+
+    <div class="canvas-card">
+      <div class="canvas-hdr">
+        <h2>Scan preview</h2>
+        <div class="canvas-info" id="c-info">—</div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="grid-canvas"></canvas>
+      </div>
+      <div class="progress-overlay">
+        <div class="prog-row">
+          <span class="prog-label" id="prog-text">Ready</span>
+          <span class="prog-pct"   id="prog-pct">0%</span>
+        </div>
+        <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+      </div>
+    </div>
+
+    <div class="log-card">
+      <div class="log-hdr">
+        <span class="dot"></span>
+        Serial log
+        <span class="spacer"></span>
+        <button class="btn-secondary btn-sm" onclick="clearLog()">Clear</button>
+      </div>
+      <div id="log"></div>
+    </div>
+
+  </div><!-- end .right -->
+
+</div>
+
+<script>
+let ws, jobRunning=false, jobPaused=false, finishMode='serial';
+
+function connectWS(){
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='log')    appendLog(m.level,m.text);
+    if(m.type==='status') handleStatus(m);
+    if(m.type==='point')  handlePoint(m);
+    if(m.type==='origin') { originX=m.ox; originY=m.oy; }
+  };
+  ws.onclose=()=>setTimeout(connectWS,2000);
+}
+connectWS();
+
+function handleStatus(s){
+  jobRunning=s.job_running; jobPaused=s.job_paused;
+  const c=s.connected;
+
+  const pc=document.getElementById('pill-conn');
+  pc.className=`pill ${c?'on':''}`;
+  pc.textContent=c?'Connected':'Disconnected';
+
+  const pj=document.getElementById('pill-job');
+  pj.style.display=jobRunning?'':'none';
+  pj.className=`pill ${jobRunning?(jobPaused?'pause':'run'):''}`;
+  pj.textContent=jobPaused?'Paused':'Running';
+
+  document.getElementById('btn-connect').disabled    = c;
+  document.getElementById('btn-disconnect').disabled = !c;
+  document.getElementById('btn-start').disabled      = !c||jobRunning;
+  document.getElementById('btn-pause').disabled      = !jobRunning;
+  document.getElementById('btn-stop').disabled       = !jobRunning;
+  document.getElementById('btn-pause').textContent   = jobPaused?'▶ Resume':'⏸ Pause';
+  document.getElementById('btn-done').style.display  = (jobRunning&&finishMode==='manual')?'':'none';
+
+  // Update header position from machine status if present
+  if(s.mpos){
+    document.getElementById('hdr-x').textContent = (+s.mpos[0]).toFixed(3);
+    document.getElementById('hdr-y').textContent = (+s.mpos[1]).toFixed(3);
+    document.getElementById('hdr-z').textContent = (+s.mpos[2]).toFixed(3);
+  }
+
+  if(s.job && s.job.total){
+    const p=Math.round(s.job.done/s.job.total*100);
+    document.getElementById('prog-fill').style.width=p+'%';
+    document.getElementById('prog-pct').textContent=p+'%';
+    document.getElementById('prog-text').textContent=
+      `${s.job.done} / ${s.job.total} pts`+(s.job.x!=null?`  ·  X${s.job.x}  Y${s.job.y}`:'');
+  } else if(!jobRunning){
+    document.getElementById('prog-fill').style.width='0%';
+    document.getElementById('prog-pct').textContent='0%';
+    document.getElementById('prog-text').textContent='Ready';
+  }
+}
+
+// ── Canvas ───────────────────────────────────────────────────────────────
+let visited=[], current=null, originX=0, originY=0;
+
+function handlePoint(m){
+  if(m.done===0) visited=[];
+  visited.push({x:m.x,y:m.y});
+  current={x:m.x,y:m.y};
+  drawCanvas();
+}
+
+function drawCanvas(){
+  const cv=document.getElementById('grid-canvas');
+  const wr=cv.parentElement;
+  const dpr=window.devicePixelRatio||1;
+  cv.width=wr.clientWidth*dpr; cv.height=wr.clientHeight*dpr;
+  cv.style.width=wr.clientWidth+'px'; cv.style.height=wr.clientHeight+'px';
+  const ctx=cv.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  const _xs =parseFloat(document.getElementById('x_start').value)||0;
+  const _xe =parseFloat(document.getElementById('x_end').value)||50;
+  const xst=parseFloat(document.getElementById('x_step').value)||10;
+  const _ys =parseFloat(document.getElementById('y_start').value)||0;
+  const _ye =parseFloat(document.getElementById('y_end').value)||50;
+  const yst=parseFloat(document.getElementById('y_step').value)||10;
+  const xs=_xs+originX, xe=_xe+originX;
+  const ys=_ys+originY, ye=_ye+originY;
+
+  const W=wr.clientWidth, H=wr.clientHeight;
+  const pad=36;
+  const dw=W-pad*2, dh=H-pad*2;
+  const tx=v=>pad+(v-xs)/(xe-xs||1)*dw;
+  const ty=v=>pad+dh-(v-ys)/(ye-ys||1)*dh;
+
+  ctx.clearRect(0,0,W,H);
+
+  ctx.strokeStyle='#e1e5ea'; ctx.lineWidth=1;
+  for(let x=xs;x<=xe+1e-9;x+=xst){
+    ctx.beginPath();ctx.moveTo(tx(x),ty(ys));ctx.lineTo(tx(x),ty(ye));ctx.stroke();
+  }
+  for(let y=ys;y<=ye+1e-9;y+=yst){
+    ctx.beginPath();ctx.moveTo(tx(xs),ty(y));ctx.lineTo(tx(xe),ty(y));ctx.stroke();
+  }
+
+  ctx.fillStyle='#6b7686'; ctx.font='11px ui-monospace, monospace';
+  ctx.textAlign='center';
+  for(let x=xs;x<=xe+1e-9;x+=xst) ctx.fillText(x.toFixed(0),tx(x),pad+dh+16);
+  ctx.textAlign='right';
+  for(let y=ys;y<=ye+1e-9;y+=yst) ctx.fillText(y.toFixed(0),pad-6,ty(y)+4);
+
+  const pts=[];
+  for(let x=xs;x<=xe+1e-9;x+=xst)
+    for(let y=ys;y<=ye+1e-9;y+=yst)
+      pts.push({x:Math.round(x*1e4)/1e4,y:Math.round(y*1e4)/1e4});
+
+  const vs=new Set(visited.map(p=>`${p.x},${p.y}`));
+
+  if(visited.length>1){
+    ctx.beginPath(); ctx.strokeStyle='rgba(37,99,235,.5)'; ctx.lineWidth=2;
+    visited.forEach((p,i)=>i===0?ctx.moveTo(tx(p.x),ty(p.y)):ctx.lineTo(tx(p.x),ty(p.y)));
+    ctx.stroke();
+  }
+
+  pts.forEach(p=>{
+    if(vs.has(`${p.x},${p.y}`)) return;
+    ctx.beginPath(); ctx.arc(tx(p.x),ty(p.y),3,0,Math.PI*2);
+    ctx.fillStyle='#e1e5ea'; ctx.strokeStyle='#cdd3da'; ctx.lineWidth=1;
+    ctx.fill(); ctx.stroke();
+  });
+
+  visited.forEach(p=>{
+    if(current&&p.x===current.x&&p.y===current.y) return;
+    ctx.beginPath(); ctx.arc(tx(p.x),ty(p.y),4,0,Math.PI*2);
+    ctx.fillStyle='rgba(22,163,74,.85)'; ctx.strokeStyle='#16a34a'; ctx.lineWidth=1;
+    ctx.fill(); ctx.stroke();
+  });
+
+  if(current){
+    const cx=tx(current.x),cy=ty(current.y);
+    ctx.beginPath(); ctx.arc(cx,cy,11,0,Math.PI*2);
+    ctx.strokeStyle='rgba(37,99,235,.35)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,cy,5,0,Math.PI*2);
+    ctx.fillStyle='#2563eb'; ctx.fill();
+    document.getElementById('c-info').textContent=
+      `X${current.x}  Y${current.y}    ${visited.length} / ${pts.length} pts`;
+  } else {
+    const nx=Math.round((xe-xs)/xst)+1, ny=Math.round((ye-ys)/yst)+1;
+    document.getElementById('c-info').textContent=`${nx} × ${ny} = ${pts.length} pts`;
+  }
+}
+
+['x_start','x_end','x_step','y_start','y_end','y_step'].forEach(id=>
+  document.getElementById(id).addEventListener('input',drawCanvas));
+window.addEventListener('resize',drawCanvas);
+setTimeout(drawCanvas,80);
+setInterval(()=>{if(jobRunning)drawCanvas();},900);
+
+// ── Log ──────────────────────────────────────────────────────────────────
+function appendLog(lv,txt){
+  const el=document.getElementById('log');
+  const d=document.createElement('div');
+  d.className=`ll ll-${lv}`;
+  const ts=new Date().toLocaleTimeString('en',{hour12:false});
+  d.innerHTML=`<span class="ts">[${ts}]</span>${txt}`;
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+function clearLog(){document.getElementById('log').innerHTML='';}
+
+// ── API ──────────────────────────────────────────────────────────────────
+async function apiPost(url,body){
+  try{
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    return r.json();
+  }catch(e){appendLog('error',`${e}`);}
+}
+
+async function refreshPorts(){
+  const r=await fetch('/api/ports');
+  const ports=await r.json();
+  const s=document.getElementById('port-select');
+  s.innerHTML=ports.length?ports.map(p=>`<option value="${p.device}">${p.device} — ${p.description}</option>`).join('')
+    :'<option>No ports found</option>';
+}
+refreshPorts();
+
+async function connect(){
+  await apiPost('/api/connect',{port:document.getElementById('port-select').value,baud:document.getElementById('baud-select').value});
+}
+async function disconnect(){await apiPost('/api/disconnect');}
+
+function jog(dir){
+  const step=document.getElementById('jog-step').value;
+  const feed=document.getElementById('jog-feed').value;
+  const cmd=dir==='zero'?'G90 G0 X0 Y0 Z0':`G91 G21 G0 ${dir[0]}${dir[1]==='+'?'':'-'}${step} F${feed}`;
+  apiPost('/api/jog',{cmd});
+}
+
+async function startJob(){
+  visited=[]; current=null; originX=0; originY=0; drawCanvas();
+  finishMode=document.getElementById('finish_mode').value;
+  await apiPost('/api/start',{
+    x_start:document.getElementById('x_start').value,
+    x_end:document.getElementById('x_end').value,
+    x_step:document.getElementById('x_step').value,
+    y_start:document.getElementById('y_start').value,
+    y_end:document.getElementById('y_end').value,
+    y_step:document.getElementById('y_step').value,
+    z_travel:document.getElementById('z_travel').value,
+    z_work:document.getElementById('z_work').value,
+    feed_xy:document.getElementById('feed_xy').value,
+    feed_z:document.getElementById('feed_z').value,
+    user_cmd:document.getElementById('user_cmd').value,
+    finish_pattern:document.getElementById('finish_pattern').value,
+    finish_mode:finishMode,
+    cmd_timeout:document.getElementById('cmd_timeout').value,
+    serpentine:document.getElementById('serpentine').checked,
+    relative_origin:document.getElementById('relative_origin').checked,
+    run_program:document.getElementById('run_program').checked,
+  });
+}
+
+document.getElementById('run_program').addEventListener('change',e=>{
+  document.getElementById('btn-start').textContent =
+    e.target.checked ? '▶ Start scan' : '▶ Start dry-run';
+});
+
+async function pauseJob(){await apiPost('/api/pause');}
+async function stopJob(){await apiPost('/api/stop');}
+async function manualFinish(){await apiPost('/api/finish_signal');}
+
+function updateFinishUI(){
+  finishMode=document.getElementById('finish_mode').value;
+  document.getElementById('lbl-pattern').style.display=finishMode==='serial'?'':'none';
+}
+updateFinishUI();
+
+// ── Grid presets ──────────────────────────────────────────────────────────
+// 96-well plate: 12 columns (X) × 8 rows (Y), 9mm well-to-well spacing.
+// Plate outer footprint ~ 127×85mm; the wells sit inside that.
+function applyPlatePreset(){
+  document.getElementById('x_start').value = 0;
+  document.getElementById('x_end').value   = (12-1) * 9;   // 99
+  document.getElementById('x_step').value  = 9;
+  document.getElementById('y_start').value = 0;
+  document.getElementById('y_end').value   = (8-1) * 9;    // 63
+  document.getElementById('y_step').value  = 9;
+  drawCanvas();
+}
+function apply24Preset(){
+  document.getElementById('x_start').value = 0;
+  document.getElementById('x_end').value   = (6-1) * 19.3; // 77.2
+  document.getElementById('x_step').value  = 19.3;
+  document.getElementById('y_start').value = 0;
+  document.getElementById('y_end').value   = (4-1) * 19.3; // 57.9
+  document.getElementById('y_step').value  = 19.3;
+  drawCanvas();
+}
+function applyGrid10(){
+  document.getElementById('x_start').value = 0; document.getElementById('x_end').value = 50; document.getElementById('x_step').value = 10;
+  document.getElementById('y_start').value = 0; document.getElementById('y_end').value = 50; document.getElementById('y_step').value = 10;
+  drawCanvas();
+}
+function applyGrid5(){
+  document.getElementById('x_start').value = 0; document.getElementById('x_end').value = 50; document.getElementById('x_step').value = 5;
+  document.getElementById('y_start').value = 0; document.getElementById('y_end').value = 50; document.getElementById('y_step').value = 5;
+  drawCanvas();
+}
+
+// Set origin at A1: assumes the head is currently positioned above A1.
+// Jog manually to the A1 corner first, then click this to G92 X0 Y0 Z0.
+async function setOriginA1(){
+  const ok = confirm(
+    'Move head to the A1 well position manually using the Jog tab, then click OK.\n\n' +
+    'This will set the current position as work origin (A1 = 0,0,0).\n\n' +
+    'Continue?'
+  );
+  if (!ok) return;
+  const r = await apiPost('/api/set_origin');
+  if (r && r.ok) {
+    appendLog('info', '✓ A1 origin set at current head position');
+  } else {
+    appendLog('error', `Failed to set origin: ${r && r.error}`);
+  }
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const target=btn.dataset.tab;
+    document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));
+    document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.dataset.panel===target));
+    setTimeout(drawCanvas,50);
+  });
+});
+</script>
+</body>
+</html>
