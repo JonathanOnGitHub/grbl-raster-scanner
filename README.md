@@ -109,7 +109,11 @@ See **`example_measure.sh`** for a ready-to-use template.
 
 ## Relative origin
 
-Tick **"Start from current pos"** in the Scan Grid section to use your current head position as the origin. Jog to the corner of your sample, tick the box, and the scan coordinates become offsets from there.
+Tick **"Start from current pos"** in the Scan Grid section to use your current head position as the origin. Jog to the corner of your sample, tick the box, and the scan coordinates become offsets from there. No pre-scan Z raise is issued — make sure the head is at a safe height before starting.
+
+## Relative movement (G91)
+
+Tick **"Relative movement"** to issue all scan moves as `G91` deltas from the current position instead of absolute `G90` targets. Useful when the controller's absolute coordinate system has drifted or been remapped (e.g. after a soft reset). Combine with **"Start from current pos"** for a true zero-motion job start.
 
 ## Serpentine path
 

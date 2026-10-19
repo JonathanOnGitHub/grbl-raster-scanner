@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Send a stepper move to the Leonardo stepper driver.
+#
+# Usage:
+#   move-stepper <steps> <speed>           # default port /dev/ttyACM0
+#   move-stepper <port> <steps> <speed>    # explicit port
+#
+# Examples:
+#   move-stepper 200 100                   # 200 steps forward at 100 steps/s
+#   move-stepper /dev/ttyACM0 -3200 800    # 3200 steps reverse at 800 steps/s
+#
+# Exits 0 on "OK" reply, non-zero on any error.
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$HERE/venv/bin/python3"
+[[ -x "$PY" ]] || PY="python3"
+
+if [[ $# -eq 2 ]]; then
+  PORT="/dev/ttyACM0"
+  STEPS="$1"
+  SPEED="$2"
+elif [[ $# -eq 3 ]]; then
+  PORT="$1"
+  STEPS="$2"
+  SPEED="$3"
+else
+  echo "usage: move-stepper [<port>] <steps> <speed>" >&2
+  echo "  e.g. move-stepper 200 100" >&2
+  echo "  e.g. move-stepper /dev/ttyACM0 -3200 800" >&2
+  exit 2
+fi
+
+exec "$PY" "$HERE/_send_move.py" "$PORT" "$STEPS" "$SPEED"

@@ -347,6 +347,51 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   gap: 12px;
   align-items: start;
 }
+.jog-pos {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 6px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.jog-pos .lbl { color: var(--text-3); margin-left: 6px; }
+.jog-pos .lbl:first-child { margin-left: 0; }
+.jog-pos .val { color: var(--text); font-weight: 500; min-width: 56px; display: inline-block; }
+.jog-pos .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border-2); margin-left: 4px;
+}
+.jog-pos.live .dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(22,163,74,.18);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.jog-pos.err .dot { background: var(--red); }
+
+.btn-estop {
+  font-family: inherit;
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: 0.04em;
+  color: #fff;
+  background: var(--red);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  width: 100%;
+  cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(220,38,38,.18);
+  transition: background .12s, box-shadow .12s, transform .04s;
+}
+.btn-estop:hover:not(:disabled)  { background: #b91c1c; border-color: #b91c1c; box-shadow: 0 0 0 4px rgba(220,38,38,.28); }
+.btn-estop:active:not(:disabled) { transform: translateY(1px); }
+.btn-estop:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 .jog-block { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .jog-label {
   font-size: 10px;
@@ -394,6 +439,22 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
+.jog-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px 10px;
+  margin: 0;
+  background: var(--surface-2);
+}
+.jog-group legend {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0 4px;
+}
+.jog-group .g2 { gap: 8px; }
 
 /* ── Checkbox ── */
 .checkbox {
@@ -611,6 +672,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
       <div class="card">
         <div class="card-hdr"><h2>Manual Jog</h2></div>
         <div class="card-body">
+          <div class="jog-pos" id="jog-pos" title="Live GRBL work position (WPos)">
+            <span class="lbl">X</span><span class="val" id="jog-x">—</span>
+            <span class="lbl">Y</span><span class="val" id="jog-y">—</span>
+            <span class="lbl">Z</span><span class="val" id="jog-z">—</span>
+            <span class="lbl dot" id="jog-dot" title="Fresh"></span>
+            <button class="btn-secondary btn-sm" id="btn-jog-refresh" title="Refresh position">↻</button>
+            <button class="btn-warn btn-sm" id="btn-set-z-work" title="Copy the current GRBL Z position into the z_work box on the Grid tab. Does not move the head.">Set Z Work</button>
+          </div>
+          <button class="btn-estop" id="btn-estop" title="Send soft-reset to GRBL (feed hold + 0x18). Halts any in-progress move immediately.">⛔ EMERGENCY STOP</button>
           <div class="jog-pad">
             <div class="jog-block">
               <div class="jog-label">XY</div>
@@ -634,12 +704,28 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
               </div>
             </div>
             <div class="jog-config">
-              <label>Step size <span class="hint">(mm)</span>
-                <input type="number" id="jog-step" value="1" step="0.1" min="0.01">
-              </label>
-              <label>Feed <span class="hint">(mm/min)</span>
-                <input type="number" id="jog-feed" value="500" min="1">
-              </label>
+              <fieldset class="jog-group">
+                <legend>XY</legend>
+                <div class="g2">
+                  <label>Distance <span class="hint">(mm)</span>
+                    <input type="number" id="jog-step-xy" value="1" step="0.1" min="0.01">
+                  </label>
+                  <label>Speed <span class="hint">(mm/min)</span>
+                    <input type="number" id="jog-speed-xy" value="500" min="1">
+                  </label>
+                </div>
+              </fieldset>
+              <fieldset class="jog-group">
+                <legend>Z</legend>
+                <div class="g2">
+                  <label>Distance <span class="hint">(mm)</span>
+                    <input type="number" id="jog-step-z" value="0.5" step="0.05" min="0.01">
+                  </label>
+                  <label>Speed <span class="hint">(mm/min)</span>
+                    <input type="number" id="jog-speed-z" value="200" min="1">
+                  </label>
+                </div>
+              </fieldset>
             </div>
           </div>
         </div>
@@ -691,10 +777,10 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
             <label>Z work <span class="hint">(mm)</span>
               <input type="number" id="z_work"   value="-2" step="0.5">
             </label>
-            <label>XY feed <span class="hint">(mm/min)</span>
+            <label>XY speed <span class="hint">(mm/min)</span>
               <input type="number" id="feed_xy" value="1000" min="1">
             </label>
-            <label>Z feed <span class="hint">(mm/min)</span>
+            <label>Z speed <span class="hint">(mm/min)</span>
               <input type="number" id="feed_z"  value="300" min="1">
             </label>
           </div>
@@ -706,6 +792,14 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
             <label class="checkbox">
               <input type="checkbox" id="relative_origin">
               Start from current position
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="relative_move">
+              Relative movement <span class="hint">(G91)</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" id="return_to_start">
+              Return to start <span class="hint">(XY)</span>
             </label>
           </div>
         </div>
@@ -729,15 +823,21 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
             <label>Finish mode
               <select id="finish_mode" onchange="updateFinishUI()">
                 <option value="serial">Serial pattern</option>
+                <option value="subprocess">Subprocess exit</option>
                 <option value="manual">Manual button</option>
-                <option value="http">Trust exit code</option>
               </select>
+              <span class="hint" id="finish_mode_hint" style="display:block;margin-top:4px"></span>
             </label>
             <label id="lbl-pattern">Pattern <span class="hint">(regex)</span>
               <input type="text" id="finish_pattern" value="SCAN_DONE">
             </label>
             <label>Timeout <span class="hint">(sec)</span>
               <input type="number" id="cmd_timeout" value="120" min="1">
+            </label>
+          </div>
+          <div class="g2">
+            <label>Wait after program exits <span class="hint">(sec, before next point)</span>
+              <input type="number" id="post_exit_delay" value="1" step="0.1" min="0">
             </label>
           </div>
         </div>
@@ -838,6 +938,7 @@ function handleStatus(s){
   document.getElementById('btn-start').disabled      = !c||jobRunning;
   document.getElementById('btn-pause').disabled      = !jobRunning;
   document.getElementById('btn-stop').disabled       = !jobRunning;
+  document.getElementById('btn-estop').disabled      = !c;
   document.getElementById('btn-pause').textContent   = jobPaused?'▶ Resume':'⏸ Pause';
   document.getElementById('btn-done').style.display  = (jobRunning&&finishMode==='manual')?'':'none';
 
@@ -993,10 +1094,15 @@ async function connect(){
 async function disconnect(){await apiPost('/api/disconnect');}
 
 function jog(dir){
-  const step=document.getElementById('jog-step').value;
-  const feed=document.getElementById('jog-feed').value;
-  const cmd=dir==='zero'?'G90 G0 X0 Y0 Z0':`G91 G21 G0 ${dir[0]}${dir[1]==='+'?'':'-'}${step} F${feed}`;
-  apiPost('/api/jog',{cmd});
+  const isZ = dir[0] === 'Z';
+  const stepId = isZ ? 'jog-step-z' : 'jog-step-xy';
+  const speedId = isZ ? 'jog-speed-z' : 'jog-speed-xy';
+  const step  = document.getElementById(stepId).value;
+  const speed = document.getElementById(speedId).value;
+  const cmd = dir === 'zero'
+    ? 'G90 G0 X0 Y0 Z0'
+    : `G91 G21 G0 ${dir[0]}${dir[1] === '+' ? '' : '-'}${step} F${speed}`;
+  apiPost('/api/jog', { cmd }).then(() => refreshJogPosAfterMove());
 }
 
 async function startJob(){
@@ -1016,9 +1122,12 @@ async function startJob(){
     user_cmd:document.getElementById('user_cmd').value,
     finish_pattern:document.getElementById('finish_pattern').value,
     finish_mode:finishMode,
+    post_exit_delay:document.getElementById('post_exit_delay').value,
     cmd_timeout:document.getElementById('cmd_timeout').value,
     serpentine:document.getElementById('serpentine').checked,
     relative_origin:document.getElementById('relative_origin').checked,
+    relative_move:document.getElementById('relative_move').checked,
+    return_to_start:document.getElementById('return_to_start').checked,
     run_program:document.getElementById('run_program').checked,
   });
 }
@@ -1032,9 +1141,16 @@ async function pauseJob(){await apiPost('/api/pause');}
 async function stopJob(){await apiPost('/api/stop');}
 async function manualFinish(){await apiPost('/api/finish_signal');}
 
+const FINISH_HINTS = {
+  serial:     "Program must echo a line matching the pattern on the GRBL serial port.",
+  subprocess: "Just wait for the program to exit (e.g. for `sleep 3` or any self-contained script).",
+  manual:     "Wait for you to press the ✓ button on the Job tab.",
+};
 function updateFinishUI(){
   finishMode=document.getElementById('finish_mode').value;
   document.getElementById('lbl-pattern').style.display=finishMode==='serial'?'':'none';
+  const hint=document.getElementById('finish_mode_hint');
+  if(hint) hint.textContent=FINISH_HINTS[finishMode]||'';
 }
 updateFinishUI();
 
@@ -1094,8 +1210,96 @@ document.querySelectorAll('.tab').forEach(btn=>{
     document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b===btn));
     document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.dataset.panel===target));
     setTimeout(drawCanvas,50);
+    if (target === 'jog') refreshJogPos();
   });
 });
+
+// ── Live position (Jog tab) ───────────────────────────────────────────────
+// Polls only on demand: on entering the Jog tab, after every jog move,
+// and via the manual Refresh button. A short follow-up refresh catches
+// the final position once a multi-step jog has fully settled.
+let jogSettleTimer = null;
+
+async function refreshJogPos(){
+  const wrap = document.getElementById('jog-pos');
+  if (!wrap) return;
+  try {
+    const r = await fetch('/api/position');
+    const j = await r.json();
+    if (j.ok) {
+      document.getElementById('jog-x').textContent = j.x.toFixed(3);
+      document.getElementById('jog-y').textContent = j.y.toFixed(3);
+      document.getElementById('jog-z').textContent = j.z.toFixed(3);
+      wrap.classList.add('live');
+      wrap.classList.remove('err');
+    } else {
+      wrap.classList.remove('live');
+      wrap.classList.add('err');
+      ['jog-x','jog-y','jog-z'].forEach(id => {
+        document.getElementById(id).textContent = '—';
+      });
+    }
+  } catch (e) {
+    wrap.classList.remove('live');
+    wrap.classList.add('err');
+  }
+}
+
+function refreshJogPosAfterMove(){
+  if (jogSettleTimer) clearTimeout(jogSettleTimer);
+  // Wait long enough for the planner to settle (1mm @ 500mm/min ≈ 120ms,
+  // accel/decel dominates). 800ms is comfortable for short jogs without
+  // making the UI feel sluggish.
+  jogSettleTimer = setTimeout(refreshJogPos, 800);
+}
+
+document.getElementById('btn-jog-refresh')?.addEventListener('click', refreshJogPos);
+
+async function setZWork(){
+  const r = await apiPost('/api/set_z_work');
+  if (r && r.ok && typeof r.z === 'number') {
+    // Update the Grid tab's z_work box to the current GRBL Z.
+    const zInput = document.getElementById('z_work');
+    if (zInput) {
+      zInput.value = (+r.z).toFixed(3);
+      zInput.dispatchEvent(new Event('input'));
+    }
+    // Also reflect in the Jog position strip for consistency.
+    if (r.x != null) document.getElementById('jog-x').textContent = (+r.x).toFixed(3);
+    if (r.y != null) document.getElementById('jog-y').textContent = (+r.y).toFixed(3);
+    if (r.z != null) document.getElementById('jog-z').textContent = (+r.z).toFixed(3);
+    document.getElementById('jog-pos')?.classList.add('live');
+    document.getElementById('jog-pos')?.classList.remove('err');
+    appendLog('info', `✓ z_work set to current Z = ${(+r.z).toFixed(3)} mm`);
+  } else {
+    appendLog('error', `Set Z Work failed: ${r && r.error}`);
+  }
+}
+
+document.getElementById('btn-set-z-work')?.addEventListener('click', setZWork);
+
+async function emergencyStop(){
+  if (!confirm('⚠ EMERGENCY STOP ⚠\n\nThis will halt all motion and soft-reset GRBL immediately.\nAny running job will be cancelled.\n\nProceed?')) return;
+  const btn = document.getElementById('btn-estop');
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = '⏳ Stopping…';
+  try {
+    const r = await apiPost('/api/estop');
+    if (r && r.ok) {
+      appendLog('warn', '⛔ EMERGENCY STOP sent');
+    } else {
+      appendLog('error', `Emergency stop failed: ${r && r.error}`);
+      btn.textContent = prev;
+    }
+  } catch (e) {
+    appendLog('error', `Emergency stop error: ${e}`);
+    btn.textContent = prev;
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = prev; }, 500);
+  }
+}
+document.getElementById('btn-estop')?.addEventListener('click', emergencyStop);
 </script>
 </body>
 </html>

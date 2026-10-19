@@ -110,21 +110,83 @@ def grbl_get_position() -> tuple:
     Prefers WPos (work position, respects G92 offsets) so callers
     see coordinates consistent with what the user sees in the UI.
     Falls back to MPos if WPos is not present in the status report.
+
+    Waits until GRBL reports `<Idle` with the *same* WPos on two
+    consecutive polls before returning. This avoids a known GRBL quirk
+    where the planner transitions to Idle just before the final position
+    update is committed to the status report — sampling at that exact
+    moment gives a half-step value. Also drains the input buffer before
+    each poll so a long-lived session never returns a stale line.
     """
-    deadline = time.time() + 5.0
+    deadline = time.time() + 15.0
+    last_status = ""
+    settled = None
     while time.time() < deadline:
         with state.serial_lock:
+            try:
+                state.serial_conn.reset_input_buffer()
+            except Exception:
+                pass
             state.serial_conn.write(b"?")
             state.serial_conn.flush()
-            line = state.serial_conn.readline().decode(errors="replace").strip()
-        # Status line looks like: <Idle|MPos:1,2,3|WPos:0,0,0|...>
-        m = re.search(r'WPos:([-\d.]+),([-\d.]+),([-\d.]+)', line)
+            old_timeout = state.serial_conn.timeout
+            state.serial_conn.timeout = 0.2
+            try:
+                status = ""
+                t_end = time.time() + 2.0
+                while time.time() < t_end and not status.startswith("<"):
+                    line = state.serial_conn.readline()
+                    if not line:
+                        continue
+                    status = line.decode(errors="replace").strip()
+                for _ in range(6):
+                    extra = state.serial_conn.readline()
+                    if not extra:
+                        break
+            finally:
+                state.serial_conn.timeout = old_timeout
+        if not status:
+            continue
+        last_status = status
+        if "<Idle" not in status:
+            log("grbl", f"<< {status} (still in motion, waiting)")
+            settled = None
+            time.sleep(0.1)
+            continue
+        m = re.search(r'WPos:([-\d.]+),([-\d.]+),([-\d.]+)', status)
         if not m:
-            m = re.search(r'MPos:([-\d.]+),([-\d.]+),([-\d.]+)', line)
-        if m:
-            return float(m.group(1)), float(m.group(2)), float(m.group(3))
+            m = re.search(r'MPos:([-\d.]+),([-\d.]+),([-\d.]+)', status)
+        if not m:
+            time.sleep(0.05)
+            continue
+        x, y, z = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        if settled is not None and (settled[0] == x and settled[1] == y and settled[2] == z):
+            log("grbl", f"<< {status} (settled)")
+            return x, y, z
+        settled = (x, y, z)
+        log("grbl", f"<< {status} (idle, awaiting confirmation)")
         time.sleep(0.1)
-    raise TimeoutError("Could not read position from GRBL")
+    raise TimeoutError(f"Could not read settled position from GRBL (last: {last_status!r})")
+
+def wait_subprocess(proc, timeout):
+    """Wait for a subprocess to exit, but abort immediately on Stop or timeout.
+
+    Returns the captured (stdout, stderr) tuple on normal exit.
+    Raises InterruptedError if the job-stop flag is set (and kills the process).
+    Raises TimeoutError if the timeout elapses (and kills the process).
+    """
+    deadline = time.time() + timeout
+    while proc.poll() is None:
+        if state.job_stop_flag:
+            proc.kill()
+            proc.wait()
+            raise InterruptedError("Job stopped by user")
+        if time.time() > deadline:
+            proc.kill()
+            proc.wait()
+            raise TimeoutError(f"User program timed out after {timeout}s")
+        time.sleep(0.05)
+    return proc.communicate()
 
 def grbl_wait_for_response(pattern: str, timeout=300.0):
     """Wait for a line matching a regex pattern on the serial port."""
@@ -185,6 +247,70 @@ def jog():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/estop", methods=["POST"])
+def estop():
+    """Emergency stop: send a soft-reset (Ctrl-X 0x18) and request a feed hold
+    first so the controller aborts the move in progress. Safe to call at any
+    time, even during a job (though the job loop may also be cancelled)."""
+    if not state.serial_conn or not state.serial_conn.is_open:
+        return jsonify({"ok": False, "error": "Not connected"}), 400
+    try:
+        with state.serial_lock:
+            # 1. Feed hold: stop motion immediately without resetting state.
+            try:
+                state.serial_conn.write(b"!")
+                state.serial_conn.flush()
+                time.sleep(0.05)
+            except Exception:
+                pass
+            # 2. Drain the bootloader reset banner that GRBL emits on open.
+            try:
+                state.serial_conn.reset_input_buffer()
+            except Exception:
+                pass
+            # 3. Soft reset: returns GRBL to a known Idle state.
+            state.serial_conn.write(b"\x18")
+            state.serial_conn.flush()
+            time.sleep(0.2)
+            try:
+                state.serial_conn.reset_input_buffer()
+            except Exception:
+                pass
+        # Also flag any in-flight job as stopped so the runner loop notices.
+        if state.job_running and not state.job_stop_flag:
+            state.job_stop_flag = True
+            log("warn", "Emergency stop requested during a job")
+        log("warn", "EMERGENCY STOP issued (soft reset)")
+        return jsonify({"ok": True})
+    except Exception as e:
+        log("error", f"Emergency stop failed: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/position", methods=["GET"])
+def position():
+    """Return current GRBL work position as JSON. Used by the Jog UI
+    to display live coordinates while the Jog tab is open."""
+    if not state.serial_conn or not state.serial_conn.is_open:
+        return jsonify({"ok": False, "error": "Not connected"}), 400
+    try:
+        x, y, z = grbl_get_position()
+        return jsonify({"ok": True, "x": x, "y": y, "z": z})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/set_z_work", methods=["POST"])
+def set_z_work():
+    """Read the current GRBL Z (WPos) and return it to the caller. No motion,
+    no G92 — the UI uses the returned value to populate the Grid tab's
+    z_work input."""
+    if not state.serial_conn or not state.serial_conn.is_open:
+        return jsonify({"ok": False, "error": "Not connected"}), 400
+    try:
+        x, y, z = grbl_get_position()
+        return jsonify({"ok": True, "x": x, "y": y, "z": z})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route("/api/home", methods=["POST"])
 def home():
@@ -288,11 +414,14 @@ def run_job(config: dict):
         feed_z   = float(config.get("feed_z", 300))
         user_cmd = config.get("user_cmd", "").strip()
         finish_pattern = config.get("finish_pattern", "SCAN_DONE").strip()
-        finish_mode = config.get("finish_mode", "serial")  # serial|http|manual
+        finish_mode = config.get("finish_mode", "serial")  # serial|manual|none
         cmd_timeout = float(config.get("cmd_timeout", 120))
         serpentine = config.get("serpentine", True)
         relative_origin = config.get("relative_origin", False)
+        relative_move = config.get("relative_move", False)
+        return_to_start = config.get("return_to_start", False)
         run_program = config.get("run_program", True)
+        post_exit_delay = max(0.0, float(config.get("post_exit_delay", 1.0)))
 
         # Build point grid
         xs = []
@@ -327,9 +456,30 @@ def run_job(config: dict):
         else:
             broadcast({"type": "origin", "ox": 0, "oy": 0})
 
-        # Raise Z to travel height first
-        grbl_send(f"G90 G0 Z{z_travel} F{feed_z}")
-        grbl_wait_for_idle()
+        # Distance mode for all scan moves: G90 (absolute) or G91 (relative/incremental).
+        # In G91 mode we issue deltas from the current position instead of target coordinates.
+        dist_mode = "G91" if relative_move else "G90"
+
+        # Track current position locally so G91 deltas are computed correctly
+        # without having to poll GRBL after every move.
+        cur_x, cur_y, cur_z = grbl_get_position()
+        cur_x, cur_y, cur_z = round(cur_x, 4), round(cur_y, 4), round(cur_z, 4)
+
+        # Remember the scan start position for the optional "return to start" move.
+        start_x, start_y, start_z = cur_x, cur_y, cur_z
+        job_completed_normally = False
+
+        # Raise Z to travel height first, unless the user has explicitly anchored
+        # the job at the current position — in that case we trust them to have
+        # the head already at a safe height and skip the pre-scan Z move.
+        if not relative_origin:
+            if relative_move:
+                dz = round(z_travel - cur_z, 4)
+                grbl_send(f"G91 G0 Z{dz} F{feed_z}")
+            else:
+                grbl_send(f"G90 G0 Z{z_travel} F{feed_z}")
+            grbl_wait_for_idle()
+            cur_z = z_travel
 
         for row_i, y in enumerate(ys):
             col_iter = reversed(xs) if (serpentine and row_i % 2 == 1) else iter(xs)
@@ -345,12 +495,25 @@ def run_job(config: dict):
                 log("info", f"→ Moving to X{x} Y{y}")
 
                 # Move XY at travel height
-                grbl_send(f"G90 G0 X{x} Y{y} F{feed_xy}")
+                if relative_move:
+                    dx = round(x - cur_x, 4)
+                    dy = round(y - cur_y, 4)
+                    if dx != 0 or dy != 0:
+                        grbl_send(f"G91 G0 X{dx} Y{dy} F{feed_xy}")
+                else:
+                    grbl_send(f"G90 G0 X{x} Y{y} F{feed_xy}")
                 grbl_wait_for_idle()
+                cur_x, cur_y = x, y
 
                 # Lower Z to work height
-                grbl_send(f"G90 G0 Z{z_work} F{feed_z}")
+                if relative_move:
+                    dz = round(z_work - cur_z, 4)
+                    if dz != 0:
+                        grbl_send(f"G91 G0 Z{dz} F{feed_z}")
+                else:
+                    grbl_send(f"G90 G0 Z{z_work} F{feed_z}")
                 grbl_wait_for_idle()
+                cur_z = z_work
 
                 broadcast({"type": "point", "x": x, "y": y, "done": done, "total": total})
 
@@ -361,7 +524,7 @@ def run_job(config: dict):
                     log("info", f"  Running: {user_cmd}")
                     proc = subprocess.Popen(user_cmd, shell=True, env=env,
                                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                    out, _ = proc.communicate(timeout=cmd_timeout)
+                    out, _ = wait_subprocess(proc, timeout=cmd_timeout)
                     if out:
                         log("cmd", out.decode(errors="replace").strip())
 
@@ -370,6 +533,9 @@ def run_job(config: dict):
                     if finish_mode == "serial":
                         log("info", f"  Waiting for serial pattern: '{finish_pattern}'")
                         grbl_wait_for_response(finish_pattern, timeout=cmd_timeout)
+                    elif finish_mode == "subprocess":
+                        # Already waited in proc.communicate() above — nothing more to do.
+                        pass
                     elif finish_mode == "manual":
                         log("info", "  Waiting for manual finish signal…")
                         deadline = time.time() + cmd_timeout
@@ -378,19 +544,50 @@ def run_job(config: dict):
                                 raise TimeoutError("Manual finish timed out")
                             time.sleep(0.1)
                         state._manual_finish = False
-                    # http mode: just trust the subprocess completed
                 else:
                     log("info", "  (dry-run: skipping program + finish wait)")
 
+                # Settle delay after the program/finish signal — gives downstream
+                # hardware (camera, valves, etc.) a moment to stabilise before
+                # the next XY move. Cancelled instantly if the user hits Stop.
+                if post_exit_delay > 0 and run_program:
+                    log("info", f"  Waiting {post_exit_delay:g}s after program exit…")
+                    waited = 0.0
+                    step = 0.05
+                    while waited < post_exit_delay:
+                        if state.job_stop_flag:
+                            raise InterruptedError("Job stopped")
+                        time.sleep(step)
+                        waited += step
+
                 # Raise Z
-                grbl_send(f"G90 G0 Z{z_travel} F{feed_z}")
+                if relative_move:
+                    dz = round(z_travel - cur_z, 4)
+                    if dz != 0:
+                        grbl_send(f"G91 G0 Z{dz} F{feed_z}")
+                else:
+                    grbl_send(f"G90 G0 Z{z_travel} F{feed_z}")
                 grbl_wait_for_idle()
+                cur_z = z_travel
 
                 done += 1
                 state.current_job = {"total": total, "done": done, "x": x, "y": y}
                 status_update()
 
         log("info", "✓ Scan complete!")
+        job_completed_normally = True
+
+        # Optional: return XY to the position the head was at when the job started.
+        if return_to_start and (start_x, start_y) != (cur_x, cur_y):
+            log("info", f"↩ Returning to start position X{start_x} Y{start_y}")
+            if relative_move:
+                dx = round(start_x - cur_x, 4)
+                dy = round(start_y - cur_y, 4)
+                if dx != 0 or dy != 0:
+                    grbl_send(f"G91 G0 X{dx} Y{dy} F{feed_xy}")
+            else:
+                grbl_send(f"G90 G0 X{start_x} Y{start_y} F{feed_xy}")
+            grbl_wait_for_idle()
 
     except InterruptedError:
         log("warn", "Job stopped by user")
