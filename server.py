@@ -25,7 +25,9 @@ sock = Sock(app)
 # ── Global state ──────────────────────────────────────────────────────────────
 class State:
     serial_conn: Optional[serial.Serial] = None
-    serial_lock = threading.Lock()
+    # Reentrant: invalidate_serial() takes this lock while the serial
+    # helpers already hold it, so a plain Lock would deadlock.
+    serial_lock = threading.RLock()
     ws_clients: list = []
     ws_lock = threading.Lock()
     job_running = False
@@ -66,20 +68,51 @@ def status_update():
     })
 
 # ── Serial helpers ─────────────────────────────────────────────────────────────
+def invalidate_serial(reason: str):
+    """Drop the current serial handle after a fatal I/O failure.
+
+    A USB device that has been unplugged and re-plugged leaves the old file
+    descriptor pointing at a dead endpoint. pyserial's ``is_open`` still
+    reports True for that handle, so every subsequent write fails with
+    Errno 5 (Input/output error) until the handle is explicitly discarded.
+    Clearing it here makes the UI report "Not connected" and prompts the
+    user to press Connect again, instead of failing every request with 400.
+    """
+    with state.serial_lock:
+        conn = state.serial_conn
+        state.serial_conn = None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    log("error", f"Serial connection lost ({reason}); press Connect to reconnect")
+    status_update()
+
+
 def grbl_send(cmd: str, wait_ok=True, timeout=10.0) -> str:
     """Send a GRBL command and optionally wait for 'ok' or 'error'."""
-    if not state.serial_conn or not state.serial_conn.is_open:
+    conn = state.serial_conn
+    if conn is None or not conn.is_open:
         raise RuntimeError("Serial not connected")
     cmd = cmd.strip() + "\n"
     with state.serial_lock:
-        state.serial_conn.write(cmd.encode())
-        state.serial_conn.flush()
+        try:
+            conn.write(cmd.encode())
+            conn.flush()
+        except (OSError, serial.SerialException) as e:
+            invalidate_serial(str(e))
+            raise RuntimeError(f"Serial connection lost: {e}") from e
         if not wait_ok:
             return ""
         deadline = time.time() + timeout
         buf = ""
         while time.time() < deadline:
-            line = state.serial_conn.readline().decode(errors="replace").strip()
+            try:
+                line = conn.readline().decode(errors="replace").strip()
+            except (OSError, serial.SerialException) as e:
+                invalidate_serial(str(e))
+                raise RuntimeError(f"Serial connection lost: {e}") from e
             if line:
                 log("grbl", f"<< {line}")
             if line.startswith("ok") or line.startswith("error"):
@@ -94,10 +127,17 @@ def grbl_wait_for_idle(timeout=120.0):
     while time.time() < deadline:
         if state.job_stop_flag:
             raise InterruptedError("Job stopped by user")
+        conn = state.serial_conn
+        if conn is None or not conn.is_open:
+            raise RuntimeError("Serial not connected")
         with state.serial_lock:
-            state.serial_conn.write(b"?")
-            state.serial_conn.flush()
-            line = state.serial_conn.readline().decode(errors="replace").strip()
+            try:
+                conn.write(b"?")
+                conn.flush()
+                line = conn.readline().decode(errors="replace").strip()
+            except (OSError, serial.SerialException) as e:
+                invalidate_serial(str(e))
+                raise RuntimeError(f"Serial connection lost: {e}") from e
         if "<Idle" in line:
             return
         time.sleep(0.2)
@@ -122,29 +162,43 @@ def grbl_get_position() -> tuple:
     last_status = ""
     settled = None
     while time.time() < deadline:
+        # Hold a local reference to the connection. invalidate_serial() sets
+        # state.serial_conn to None from another thread (or from inside the
+        # exception handler below), so re-reading the attribute later would
+        # raise AttributeError on None instead of the real I/O error.
+        conn = state.serial_conn
+        if conn is None or not conn.is_open:
+            raise RuntimeError("Serial not connected")
         with state.serial_lock:
             try:
-                state.serial_conn.reset_input_buffer()
+                conn.reset_input_buffer()
             except Exception:
                 pass
-            state.serial_conn.write(b"?")
-            state.serial_conn.flush()
-            old_timeout = state.serial_conn.timeout
-            state.serial_conn.timeout = 0.2
+            try:
+                conn.write(b"?")
+                conn.flush()
+            except (OSError, serial.SerialException) as e:
+                invalidate_serial(str(e))
+                raise RuntimeError(f"Serial connection lost: {e}") from e
+            old_timeout = conn.timeout
+            conn.timeout = 0.2
             try:
                 status = ""
                 t_end = time.time() + 2.0
                 while time.time() < t_end and not status.startswith("<"):
-                    line = state.serial_conn.readline()
+                    line = conn.readline()
                     if not line:
                         continue
                     status = line.decode(errors="replace").strip()
                 for _ in range(6):
-                    extra = state.serial_conn.readline()
+                    extra = conn.readline()
                     if not extra:
                         break
+            except (OSError, serial.SerialException) as e:
+                invalidate_serial(str(e))
+                raise RuntimeError(f"Serial connection lost: {e}") from e
             finally:
-                state.serial_conn.timeout = old_timeout
+                conn.timeout = old_timeout
         if not status:
             continue
         last_status = status
@@ -195,8 +249,15 @@ def grbl_wait_for_response(pattern: str, timeout=300.0):
     while time.time() < deadline:
         if state.job_stop_flag:
             raise InterruptedError("Job stopped by user")
+        conn = state.serial_conn
+        if conn is None or not conn.is_open:
+            raise RuntimeError("Serial not connected")
         with state.serial_lock:
-            line = state.serial_conn.readline().decode(errors="replace").strip()
+            try:
+                line = conn.readline().decode(errors="replace").strip()
+            except (OSError, serial.SerialException) as e:
+                invalidate_serial(str(e))
+                raise RuntimeError(f"Serial connection lost: {e}") from e
         if line:
             log("serial", f"<< {line}")
             if rx.search(line):
@@ -213,12 +274,23 @@ def list_ports():
 
 @app.route("/api/connect", methods=["POST"])
 def connect():
-    data = request.json
+    data = request.json or {}
     port = data.get("port")
-    baud = int(data.get("baud", 115200))
+    if not port:
+        return jsonify({"ok": False, "error": "No port selected"}), 400
     try:
-        if state.serial_conn and state.serial_conn.is_open:
-            state.serial_conn.close()
+        baud = int(data.get("baud", 115200))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Invalid baud rate"}), 400
+    try:
+        # Drop any previous handle first — including a stale one left behind
+        # by a device that was unplugged — so the new connection starts clean.
+        if state.serial_conn is not None:
+            try:
+                state.serial_conn.close()
+            except Exception:
+                pass
+            state.serial_conn = None
         conn = serial.Serial(port, baud, timeout=2)
         time.sleep(2)  # GRBL boot
         conn.flushInput()
@@ -227,12 +299,27 @@ def connect():
         status_update()
         return jsonify({"ok": True})
     except Exception as e:
+        state.serial_conn = None
+        log("error", f"Connect to {port} failed: {e}")
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/disconnect", methods=["POST"])
 def disconnect():
-    if state.serial_conn:
-        state.serial_conn.close()
+    # A running job thread may still be using the handle. Closing it here
+    # while the job is mid-move leaves that thread writing to a None/closed
+    # object, which kills the job with an unhandled exception. Stop the job
+    # first so the thread unwinds cleanly before the handle goes away.
+    if state.job_running:
+        state.job_stop_flag = True
+        log("warn", "Stop requested before disconnecting")
+        deadline = time.time() + 5.0
+        while state.job_running and time.time() < deadline:
+            time.sleep(0.05)
+    if state.serial_conn is not None:
+        try:
+            state.serial_conn.close()
+        except Exception:
+            pass
         state.serial_conn = None
     log("info", "Disconnected")
     status_update()
@@ -240,12 +327,19 @@ def disconnect():
 
 @app.route("/api/jog", methods=["POST"])
 def jog():
-    data = request.json
+    data = request.json or {}
     cmd = data.get("cmd", "")
+    if not cmd:
+        return jsonify({"ok": False, "error": "No command supplied"}), 400
     try:
         grbl_send(cmd, wait_ok=True)
         return jsonify({"ok": True})
     except Exception as e:
+        # A dropped connection is a distinct, recoverable condition: the UI
+        # shows "press Connect" rather than a generic bad-request message.
+        if state.serial_conn is None:
+            return jsonify({"ok": False, "error": str(e),
+                            "reconnect_required": True}), 409
         return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/estop", methods=["POST"])
@@ -292,12 +386,14 @@ def position():
     """Return current GRBL work position as JSON. Used by the Jog UI
     to display live coordinates while the Jog tab is open."""
     if not state.serial_conn or not state.serial_conn.is_open:
-        return jsonify({"ok": False, "error": "Not connected"}), 400
+        return jsonify({"ok": False, "error": "Not connected",
+                        "reconnect_required": True}), 409
     try:
         x, y, z = grbl_get_position()
         return jsonify({"ok": True, "x": x, "y": y, "z": z})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": str(e),
+                        "reconnect_required": state.serial_conn is None}), 500
 
 @app.route("/api/set_z_work", methods=["POST"])
 def set_z_work():
@@ -305,12 +401,14 @@ def set_z_work():
     no G92 — the UI uses the returned value to populate the Grid tab's
     z_work input."""
     if not state.serial_conn or not state.serial_conn.is_open:
-        return jsonify({"ok": False, "error": "Not connected"}), 400
+        return jsonify({"ok": False, "error": "Not connected",
+                        "reconnect_required": True}), 409
     try:
         x, y, z = grbl_get_position()
         return jsonify({"ok": True, "x": x, "y": y, "z": z})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": str(e),
+                        "reconnect_required": state.serial_conn is None}), 500
 
 @app.route("/api/home", methods=["POST"])
 def home():
@@ -360,7 +458,7 @@ def manual_finish():
 @app.route("/api/set_origin", methods=["POST"])
 def set_origin():
     """Set the current head position as the work origin (G92 X0 Y0 Z0)."""
-    if state.ser is None:
+    if not state.serial_conn or not state.serial_conn.is_open:
         return jsonify({"ok": False, "error": "Not connected"}), 400
     if state.job_running:
         return jsonify({"ok": False, "error": "Cannot set origin while a job is running"}), 400
@@ -591,6 +689,10 @@ def run_job(config: dict):
 
     except InterruptedError:
         log("warn", "Job stopped by user")
+    except RuntimeError as e:
+        # Raised by grbl_send/grbl_get_position when the serial link dies.
+        # Report it as a connection loss rather than an opaque job failure.
+        log("error", f"Job aborted: {e}")
     except Exception as e:
         log("error", f"Job failed: {e}")
     finally:

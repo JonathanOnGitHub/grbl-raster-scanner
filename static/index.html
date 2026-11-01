@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GRBL Raster Scanner</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232563eb'/%3E%3Cpath d='M8 22V10h3v9h6v3H8zm12 0V10h3v12h-3z' fill='white'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1075,8 +1076,18 @@ function clearLog(){document.getElementById('log').innerHTML='';}
 async function apiPost(url,body){
   try{
     const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
-    return r.json();
-  }catch(e){appendLog('error',`${e}`);}
+    let j;
+    try{ j=await r.json(); }catch(_){ j={ok:false,error:`HTTP ${r.status}`}; }
+    // Surface server-side failures in the log. A non-2xx response is not an
+    // exception, so it would otherwise be invisible to the user.
+    if(j && j.ok===false){
+      appendLog('error',`${url}: ${j.error||('HTTP '+r.status)}`);
+    }
+    return j;
+  }catch(e){
+    appendLog('error',`${url}: ${e}`);
+    return {ok:false,error:String(e)};
+  }
 }
 
 async function refreshPorts(){
@@ -1089,7 +1100,18 @@ async function refreshPorts(){
 refreshPorts();
 
 async function connect(){
-  await apiPost('/api/connect',{port:document.getElementById('port-select').value,baud:document.getElementById('baud-select').value});
+  const port=document.getElementById('port-select').value;
+  const baud=document.getElementById('baud-select').value;
+  if(!port || port==='No ports found'){
+    appendLog('error','No serial port selected');
+    return;
+  }
+  const r=await apiPost('/api/connect',{port,baud});
+  if(r && r.ok){
+    appendLog('info',`✓ Connected to ${port} @ ${baud} baud`);
+  }else if(r){
+    appendLog('error',`Connect failed: ${r.error||'unknown error'}`);
+  }
 }
 async function disconnect(){await apiPost('/api/disconnect');}
 
@@ -1102,7 +1124,17 @@ function jog(dir){
   const cmd = dir === 'zero'
     ? 'G90 G0 X0 Y0 Z0'
     : `G91 G21 G0 ${dir[0]}${dir[1] === '+' ? '' : '-'}${step} F${speed}`;
-  apiPost('/api/jog', { cmd }).then(() => refreshJogPosAfterMove());
+  apiPost('/api/jog', { cmd }).then(r=>{
+    // Only refresh the position readout if the move actually succeeded;
+    // otherwise mark the strip stale and tell the user what to do.
+    if(r && r.ok){
+      refreshJogPosAfterMove();
+    }else if(r && r.reconnect_required){
+      document.getElementById('jog-pos')?.classList.add('err');
+      document.getElementById('jog-pos')?.classList.remove('live');
+      appendLog('warn','Serial connection lost — press Connect to reconnect');
+    }
+  });
 }
 
 async function startJob(){
@@ -1238,6 +1270,9 @@ async function refreshJogPos(){
       ['jog-x','jog-y','jog-z'].forEach(id => {
         document.getElementById(id).textContent = '—';
       });
+      if (j.reconnect_required) {
+        document.getElementById('jog-dot')?.setAttribute('title','Serial not connected — press Connect');
+      }
     }
   } catch (e) {
     wrap.classList.remove('live');
